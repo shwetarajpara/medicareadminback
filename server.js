@@ -24,9 +24,12 @@ const port = process.env.PORT || 3000;
 // "https://your-deployed-admin.example.com,https://your-patient-app.example.com"
 // Add your real deployed frontend URL(s) here before deploying this change —
 // the default below only allows local dev.
+// Trailing slashes are stripped: browsers send the Origin header without
+// one ("https://admin.example.com"), so a value pasted from the address bar
+// ("https://admin.example.com/") would otherwise never match.
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3001')
     .split(',')
-    .map(o => o.trim())
+    .map(o => o.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
 app.use(cors({
