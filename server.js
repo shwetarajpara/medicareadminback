@@ -27,7 +27,7 @@ const port = process.env.PORT || 3000;
 // Trailing slashes are stripped: browsers send the Origin header without
 // one ("https://admin.example.com"), so a value pasted from the address bar
 // ("https://admin.example.com/") would otherwise never match.
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3001')
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000' || 'http://localhost:3001' || 'http://localhost:3002' )
     .split(',')
     .map(o => o.trim().replace(/\/+$/, ''))
     .filter(Boolean);
