@@ -29,6 +29,9 @@ async function seed() {
     }
 
     const hashed = await hashPassword(password);
+    console.log("=====hashed======", hashed);
+    console.log("=======password====", password);
+    
     await adminModel.create({ fullName, email, password: hashed, mobileNumber });
 
     console.log(`Super Admin created: ${email}`);

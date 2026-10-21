@@ -20,6 +20,11 @@ const dateRange = (dateFilter) => {
     }
 };
 
+// Appointments that never turned into a visit — ignored for "last visited".
+const NOT_VISITED_STATUSES = ['Cancelled', 'NoShow'];
+// Booked and not seen yet — "Ongoing" is the legacy name for "Booked".
+const UPCOMING_STATUSES = ['Booked', 'Ongoing'];
+
 // Non-empty string from the appointment, else the linked user's value.
 const preferAppointment = (field, fallback) => ({
     $cond: [
@@ -86,6 +91,45 @@ const getPatients = async (req, res) => {
                     abhaNumber: { $first: '$user.abhaNumber' },
                     abhaAddress: { $first: '$user.abhaAddress' },
                     lastVisitAt: { $max: '$appointmentDate' },
+                    // Shown as "Last visit": only a visit that has actually
+                    // happened — not an upcoming booking, a cancellation or a
+                    // no-show. ($max skips the nulls.)
+                    lastVisitedAt: {
+                        $max: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $lte: ['$appointmentDate', moment().endOf('day').toDate()] },
+                                        { $not: [{ $in: ['$status', NOT_VISITED_STATUSES] }] },
+                                        // Today's booking counts only once the patient is
+                                        // actually seen; until then it's the next visit.
+                                        { $or: [
+                                            { $lt: ['$appointmentDate', moment().startOf('day').toDate()] },
+                                            { $not: [{ $in: [{ $ifNull: ['$status', 'Booked'] }, UPCOMING_STATUSES] }] },
+                                        ] },
+                                    ],
+                                },
+                                '$appointmentDate',
+                                null,
+                            ],
+                        },
+                    },
+                    // Shown as "Next visit": the earliest booking from today on
+                    // that hasn't been seen yet ($min skips the nulls).
+                    nextVisitAt: {
+                        $min: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $gte: ['$appointmentDate', moment().startOf('day').toDate()] },
+                                        { $in: [{ $ifNull: ['$status', 'Booked'] }, UPCOMING_STATUSES] },
+                                    ],
+                                },
+                                '$appointmentDate',
+                                null,
+                            ],
+                        },
+                    },
                     totalVisits: { $sum: 1 },
                     diseases: { $addToSet: '$disease' },
                     appointments: {
@@ -123,7 +167,10 @@ const getPatients = async (req, res) => {
             abhaAddress: p.abhaAddress || null,
             appointments: p.appointments,
             totalVisits: p.totalVisits,
-            lastVisit: p.lastVisitAt ? moment(p.lastVisitAt).format('DD MMM YYYY') : '—',
+            lastVisit: p.lastVisitedAt ? moment(p.lastVisitedAt).format('DD MMM YYYY') : '—',
+            lastVisitedAt: p.lastVisitedAt || null,
+            nextVisit: p.nextVisitAt ? moment(p.nextVisitAt).format('DD MMM YYYY') : '—',
+            nextVisitAt: p.nextVisitAt || null,
             diseases: (p.diseases || []).filter(Boolean),
         }));
 

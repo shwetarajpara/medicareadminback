@@ -595,6 +595,61 @@ const listPatients = async (req, res) => {
         ]);
         const visitsBy = new Map(visitCounts.map((v) => [String(v._id), v]));
 
+        // Last visited = latest appointment date that has already happened
+        // and wasn't cancelled / a no-show (an upcoming booking isn't a visit).
+        // Next visit = earliest booking from today on that hasn't been seen
+        // yet ("Ongoing" is the legacy name for "Booked").
+        const appts = await appointmentModel.find({ delete: false, userId: { $in: ids } }, { _id: 1, userId: 1 }).lean();
+        const userByAppt = new Map(appts.map((a) => [String(a._id), String(a.userId)]));
+        const details = appts.length
+            ? await appointmentdetailModel.aggregate([
+                { $match: { delete: false, appointmentId: { $in: appts.map((a) => a._id) }, appointmentDate: { $ne: null } } },
+                {
+                    $group: {
+                        _id: '$appointmentId',
+                        lastAt: {
+                            $max: {
+                                $cond: [
+                                    { $and: [
+                                        { $lte: ['$appointmentDate', moment().endOf('day').toDate()] },
+                                        { $not: [{ $in: ['$status', ['Cancelled', 'NoShow']] }] },
+                                        // Today's booking counts only once the patient is
+                                        // actually seen; until then it's the next visit.
+                                        { $or: [
+                                            { $lt: ['$appointmentDate', moment().startOf('day').toDate()] },
+                                            { $not: [{ $in: [{ $ifNull: ['$status', 'Booked'] }, ['Booked', 'Ongoing']] }] },
+                                        ] },
+                                    ] },
+                                    '$appointmentDate',
+                                    null,
+                                ],
+                            },
+                        },
+                        nextAt: {
+                            $min: {
+                                $cond: [
+                                    { $and: [
+                                        { $gte: ['$appointmentDate', moment().startOf('day').toDate()] },
+                                        { $in: [{ $ifNull: ['$status', 'Booked'] }, ['Booked', 'Ongoing']] },
+                                    ] },
+                                    '$appointmentDate',
+                                    null,
+                                ],
+                            },
+                        },
+                    },
+                },
+            ])
+            : [];
+        const lastVisitedBy = new Map();
+        const nextVisitBy = new Map();
+        for (const d of details) {
+            const userId = userByAppt.get(String(d._id));
+            if (!userId) continue;
+            if (d.lastAt && (!lastVisitedBy.has(userId) || d.lastAt > lastVisitedBy.get(userId))) lastVisitedBy.set(userId, d.lastAt);
+            if (d.nextAt && (!nextVisitBy.has(userId) || d.nextAt < nextVisitBy.get(userId))) nextVisitBy.set(userId, d.nextAt);
+        }
+
         const patients = facet.rows.map((u) => {
             const v = visitsBy.get(String(u._id));
             return {
@@ -602,6 +657,8 @@ const listPatients = async (req, res) => {
                 appointmentCount: v?.count || 0,
                 hospitalsVisited: v ? v.hospitals.filter(Boolean).length : 0,
                 lastBookedAt: v?.lastBookedAt || null,
+                lastVisitedAt: lastVisitedBy.get(String(u._id)) || null,
+                nextVisitAt: nextVisitBy.get(String(u._id)) || null,
             };
         });
 

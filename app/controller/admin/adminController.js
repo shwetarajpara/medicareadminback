@@ -179,7 +179,11 @@ const signin = async (req, res) => {
     try {
         for (const role of ['hospital', 'admin']) {
             const Model = getAccountModelByRole(role);
+            // console.log("==Model====", Model);
+            // console.log("===query====", query);
             const account = await Model.findOne(query);
+            // console.log("==query====", account);
+            
             if (!account || !(await comparePassword(password, account.password))) continue;
 
             if (isLegacyHash(account.password)) {
