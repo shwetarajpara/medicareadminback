@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const { scopeFilter, departmentFilter } = require('../../middleware/scope');
 const { parsePrescriptions } = require('../../helper/prescriptions');
 const { parsePagination, paginationMeta, searchRegex } = require('../../helper/pagination');
+const { parseDateFilter } = require('../../helper/dateFilter');
 
 // IpdDetail (instructions) has no hospitalId of its own — ownership is
 // checked via its parent IPD record.
@@ -233,6 +234,9 @@ const getAllIpd = async (req, res) => {
         const search = searchRegex(req.query.search);
 
         const condition = departmentFilter(req, scopeFilter(req, { delete: false }));
+        // Today / this week / this month / custom range, on the admission date.
+        const admitted = parseDateFilter(req.query);
+        if (admitted) condition.ipdAdmissionDate = admitted;
         if (search) {
             // departmentFilter may already use $or — combine under $and so
             // neither clause overwrites the other.

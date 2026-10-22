@@ -10,6 +10,7 @@ const { scopeFilter, findScoped } = require('../../middleware/scope');
 const { getOrCreateHospitalCode } = require('../../helper/hospitalCode');
 const { fillDocxTemplate } = require('../../helper/docxFill');
 const { convertDocxBufferToPdf } = require('../../helper/docxToPdf');
+const { parseDateFilter } = require('../../helper/dateFilter');
 
 // CRT<hospital code><YYYYMMDD><3-digit seq>, e.g. CRTABC20261005001 — the
 // 001 is this hospital's first certificate issued that calendar day (atomic
@@ -229,6 +230,9 @@ const getCertificates = async (req, res) => {
         if (userId) condition.userId = userId;
         if (appointmentId) condition.appointmentId = appointmentId;
         if (templateId) condition.templateId = templateId;
+        // Today / this week / this month / custom range, on the date issued.
+        const created = parseDateFilter(req.body);
+        if (created) condition.create = created;
 
         // searchQuery matches patient name / mobile / certificate number /
         // template name server-side, so search covers every page.

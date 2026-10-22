@@ -1,24 +1,14 @@
 const moment = require('moment');
+const mongoose = require('mongoose');
 const appointmentModel = require('../../model/appointment');
 const appointmentdetailModel = require('../../model/appointmentdetail');
+const doctorModel = require('../../model/doctor');
+const IPD = require('../../model/ipd');
+const IpdDetail = require('../../model/ipdDetails');
 const { errorResponse } = require('../../helper/index');
+const { scopeFilter } = require('../../middleware/scope');
+const { parseDateFilter } = require('../../helper/dateFilter');
 const { parsePagination, paginationMeta, pageStages, searchRegex } = require('../../helper/pagination');
-
-// Same named ranges the Patients page has always offered.
-const dateRange = (dateFilter) => {
-    switch (dateFilter) {
-        case 'today':
-            return [moment().startOf('day'), moment().endOf('day')];
-        case 'week':
-            return [moment().startOf('week'), moment().endOf('week')];
-        case 'month':
-            return [moment().startOf('month'), moment().endOf('month')];
-        case 'lastMonth':
-            return [moment().subtract(1, 'month').startOf('month'), moment().subtract(1, 'month').endOf('month')];
-        default:
-            return null;
-    }
-};
 
 // Appointments that never turned into a visit — ignored for "last visited".
 const NOT_VISITED_STATUSES = ['Cancelled', 'NoShow'];
@@ -50,7 +40,8 @@ const getPatients = async (req, res) => {
 
         const pagination = parsePagination(req.body);
         const search = searchRegex(req.body.search);
-        const range = dateRange(req.body.dateFilter);
+        // Today / this week / this month / last month / custom range.
+        const range = parseDateFilter(req.body);
 
         const hospitalAppointmentIds = await appointmentModel
             .find({ hospitalId, delete: false }, { _id: 1 })
@@ -58,7 +49,7 @@ const getPatients = async (req, res) => {
             .then((rows) => rows.map((r) => r._id));
 
         const match = { delete: false, appointmentId: { $in: hospitalAppointmentIds } };
-        if (range) match.appointmentDate = { $gte: range[0].toDate(), $lte: range[1].toDate() };
+        if (range) match.appointmentDate = range;
 
         const pipeline = [
             { $match: match },
@@ -190,4 +181,105 @@ const getPatients = async (req, res) => {
     }
 };
 
-module.exports = { getPatients };
+// A patient's past medical records at the caller's hospital: every OPD
+// appointment's clinical note (complaints, prescription, lab report + file,
+// advice, suggested next appointment) and every IPD round entry, newest
+// first. "Same patient" = same mobile number or same patient account — the
+// rule medicineController uses (app bookings may have no mobileNumber on
+// the appointment, staff bookings may have no userId).
+//
+// Body: { mobileNumber?, userId? } (at least one), plus hospitalId for the
+// superadmin (hospital staff are scoped by their token).
+const getPatientRecords = async (req, res) => {
+    try {
+        const { mobileNumber, userId } = req.body;
+        const samePatient = [];
+        if (mobileNumber && mobileNumber !== 'N/A') samePatient.push({ mobileNumber: String(mobileNumber) });
+        if (userId && mongoose.isValidObjectId(userId)) samePatient.push({ userId });
+        if (!samePatient.length) {
+            return errorResponse(res, 'mobileNumber or userId is required');
+        }
+
+        const appointments = await appointmentModel
+            .find(scopeFilter(req, { delete: false, $or: samePatient }), { _id: 1, doctorId: 1, disease: 1 })
+            .lean();
+        const appointmentIds = appointments.map((a) => a._id);
+        const apptById = new Map(appointments.map((a) => [String(a._id), a]));
+        const ipds = await IPD.find(scopeFilter(req, { delete: false, appointmentId: { $in: appointmentIds } }), { _id: 1, doctorId: 1 }).lean();
+        const ipdById = new Map(ipds.map((i) => [String(i._id), i]));
+
+        const [opd, ipd] = await Promise.all([
+            appointmentdetailModel.find({ delete: false, appointmentId: { $in: appointmentIds } }).lean(),
+            IpdDetail.find({ delete: false, ipdId: { $in: ipds.map((i) => i._id) } }).lean(),
+        ]);
+
+        // Doctor names for every record in one query.
+        const doctorIds = new Set();
+        opd.forEach((d) => { const id = d.doctorId || apptById.get(String(d.appointmentId))?.doctorId; if (id) doctorIds.add(String(id)); });
+        ipd.forEach((d) => { const id = d.doctorId || ipdById.get(String(d.ipdId))?.doctorId; if (id) doctorIds.add(String(id)); });
+        const doctors = await doctorModel.find({ _id: { $in: [...doctorIds] } }, { name: 1 }).lean();
+        const doctorName = new Map(doctors.map((d) => [String(d._id), d.name]));
+        const nameOf = (id) => (id ? doctorName.get(String(id)) || null : null);
+
+        const prescriptionsOf = (rows) => (Array.isArray(rows) ? rows : [])
+            .filter((p) => String(p.medicineName || '').trim())
+            .map((p) => ({ medicineName: p.medicineName, timing: p.timing || [], mealInstruction: p.mealInstruction || '', days: p.days || '' }));
+
+        const records = [
+            ...opd.map((d) => {
+                const prescriptions = prescriptionsOf(d.prescriptions);
+                return {
+                    _id: d._id,
+                    type: 'OPD',
+                    date: d.appointmentDate || d.create,
+                    time: d.appointmentTime || '',
+                    status: d.status === 'Ongoing' ? 'Booked' : d.status || 'Booked',
+                    doctorName: nameOf(d.doctorId || apptById.get(String(d.appointmentId))?.doctorId),
+                    disease: d.disease || apptById.get(String(d.appointmentId))?.disease || '',
+                    complaints: d.chiefComplaints || '',
+                    probableDiagnosis: d.probableDiagnosis || '',
+                    labInvestigations: d.labInvestigations || '',
+                    labReport: d.labReportNotes || '',
+                    labReportFile: d.labReports || '',
+                    advice: d.advice || '',
+                    remarks: d.doctorRemarks || '',
+                    prescriptions,
+                    // Older notes only have the free-text prescription.
+                    legacyPrescription: prescriptions.length ? '' : d.prescriptionList || '',
+                    nextAppointmentDate: d.nextAppointmentDate || null,
+                };
+            }),
+            ...ipd.map((d) => ({
+                _id: d._id,
+                type: 'IPD',
+                date: d.instructionDate || d.create,
+                time: d.instructionDate ? moment(d.instructionDate).format('HH:mm') : '',
+                status: 'IPD round',
+                doctorName: nameOf(d.doctorId || ipdById.get(String(d.ipdId))?.doctorId),
+                disease: '',
+                complaints: d.complaints || '',
+                labInvestigations: d.labInvestigations || '',
+                labReport: d.labReport || '',
+                labReportFile: d.labReportFile || '',
+                advice: d.advice || '',
+                remarks: d.remarks || '',
+                prescriptions: prescriptionsOf(d.prescriptions),
+                instructions: d.instructions ? [{ description: d.instructions }] : [],
+            })),
+        ].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+        // The most recent suggested follow-up, for the patient summary.
+        const suggested = records.find((r) => r.nextAppointmentDate);
+
+        return res.status(200).json({
+            status: 200,
+            message: 'Patient records fetched successfully',
+            data: { records, suggestedNextAppointmentDate: suggested?.nextAppointmentDate || null },
+        });
+    } catch (error) {
+        console.error('Error fetching patient records:', error);
+        return errorResponse(res, 'Error fetching patient records');
+    }
+};
+
+module.exports = { getPatients, getPatientRecords };

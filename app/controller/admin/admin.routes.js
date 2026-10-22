@@ -112,6 +112,7 @@ router.post('/getappointmentswithdetails', staff, withHospitalScope({ required: 
 router.post('/getappointmentsdata', staff, withHospitalScope({ required: false }), adminController.getAppointmentsData); // corrected the route to lowercase
 // Patients list (visits grouped by mobile number), paginated server-side.
 router.post('/patients/list', staff, withHospitalScope({ required: false }), patientController.getPatients);
+router.post('/patients/records', staff, withHospitalScope({ required: false }), patientController.getPatientRecords);
 // Dashboard numbers computed server-side (was: download everything, compute in browser).
 router.post('/dashboard/stats', staff, withHospitalScope({ required: false }), dashboardController.getDashboardStats);
 

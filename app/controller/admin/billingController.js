@@ -6,6 +6,7 @@ const { successResponse, errorResponse, saveModel, selectdatv2, updateModel, upd
 const { createUpiLink } = require('../../helper/paymentLinkService');
 const { scopeFilter, findScoped } = require('../../middleware/scope');
 const { getOrCreateHospitalCode } = require('../../helper/hospitalCode');
+const { parseDateFilter } = require('../../helper/dateFilter');
 
 // ---- Charge Master ----
 
@@ -223,6 +224,9 @@ const getBills = async (req, res) => {
 
         const condition = scopeFilter(req, { delete: false });
         if (paymentStatus) condition.paymentStatus = paymentStatus;
+        // Today / this week / this month / custom range, on the bill date.
+        const created = parseDateFilter(req.body);
+        if (created) condition.create = created;
 
         const { data: bills, totalRecords } = await selectdatv2(
             billModel, condition, '', parseInt(limit), parseInt(offset),
