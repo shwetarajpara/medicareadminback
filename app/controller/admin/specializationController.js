@@ -113,7 +113,11 @@ const getDepartments = async (req, res) => {
         );
 
         const withCounts = await Promise.all(departments.map(async (dept) => {
-            const doctorCount = await doctorModel.countDocuments({ specializationId: dept._id, delete: false });
+            // Only this hospital's doctors — a Global department is shared
+            // across hospitals, and other hospitals' doctors don't belong here.
+            const doctorCount = await doctorModel.countDocuments({
+                specializationId: dept._id, delete: false, ...(hospitalId ? { hospitalId } : {}),
+            });
             return { ...dept.toObject(), doctorCount };
         }));
 
@@ -149,11 +153,18 @@ const getDepartmentDoctors = async (req, res) => {
     }
 };
 
+// Body: { departmentId, doctorIds, replace? }
+//   replace: false (default) — adds doctorIds to the department (doctorIds must be non-empty).
+//   replace: true            — doctorIds becomes the department's exact doctor list:
+//                              listed doctors are assigned, this hospital's other
+//                              doctors in the department are unassigned (an empty
+//                              list unassigns everyone).
 const assignDoctorsToDepartment = async (req, res) => {
     try {
         const { departmentId, doctorIds } = req.body;
+        const replace = req.body.replace === true || req.body.replace === 'true';
 
-        if (!departmentId || !Array.isArray(doctorIds) || doctorIds.length === 0) {
+        if (!departmentId || !Array.isArray(doctorIds) || (!replace && doctorIds.length === 0)) {
             return errorResponse(res, 'departmentId and a non-empty doctorIds array are required');
         }
 
@@ -168,15 +179,24 @@ const assignDoctorsToDepartment = async (req, res) => {
         const doctorCondition = { _id: { $in: doctorIds }, delete: false };
         if (!req.isSuperAdmin) doctorCondition.hospitalId = req.hospitalId;
 
-        const matchedCount = await doctorModel.countDocuments(doctorCondition);
+        const matchedCount = doctorIds.length ? await doctorModel.countDocuments(doctorCondition) : 0;
         if (matchedCount !== doctorIds.length) {
             return errorResponse(res, 'One or more doctors were not found in this hospital');
         }
 
-        await doctorModel.updateMany(
-            doctorCondition,
-            { $set: { specializationId: departmentId, update: new Date() } }
-        );
+        if (doctorIds.length) {
+            await doctorModel.updateMany(
+                doctorCondition,
+                { $set: { specializationId: departmentId, update: new Date() } }
+            );
+        }
+
+        if (replace) {
+            // Unassign this hospital's doctors that were unticked.
+            const removeCondition = { specializationId: departmentId, _id: { $nin: doctorIds }, delete: false };
+            if (!req.isSuperAdmin) removeCondition.hospitalId = req.hospitalId;
+            await doctorModel.updateMany(removeCondition, { $set: { specializationId: null, update: new Date() } });
+        }
 
         return successResponse(res, 'Doctors assigned to department successfully');
     } catch (error) {

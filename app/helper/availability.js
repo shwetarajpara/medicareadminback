@@ -50,7 +50,24 @@ const getEffectiveShifts = async (doctor, dateStr) => {
 // slot), 'fully_booked' (shifts exist but every slot is taken), 'holiday'
 // (a full-day leave override), or 'closed' (not scheduled to work that day
 // at all under the normal weekly pattern).
-const getDoctorSlots = async (doctorId, dateStr) => {
+//
+// opts.tzOffsetMinutes — the caller's new Date().getTimezoneOffset() (IST =
+// -330). "Today" and "already started" use the clinic's own clock, never the
+// server's: the deployed server runs in UTC, 5:30 behind IST, so past hours
+// were still being offered. Callers that don't send it (the patient app,
+// direct API calls) get CLINIC_TZ_OFFSET_MINUTES from .env, else IST.
+const DEFAULT_TZ_OFFSET_MINUTES = Number.isFinite(Number(process.env.CLINIC_TZ_OFFSET_MINUTES))
+    && process.env.CLINIC_TZ_OFFSET_MINUTES !== undefined && process.env.CLINIC_TZ_OFFSET_MINUTES !== ''
+    ? Number(process.env.CLINIC_TZ_OFFSET_MINUTES)
+    : -330;
+
+const clinicNow = (tzOffsetMinutes) => {
+    const offset = Number(tzOffsetMinutes);
+    const hasOffset = tzOffsetMinutes !== undefined && tzOffsetMinutes !== null && tzOffsetMinutes !== '' && Number.isFinite(offset);
+    return moment().utcOffset(-(hasOffset ? offset : DEFAULT_TZ_OFFSET_MINUTES));
+};
+
+const getDoctorSlots = async (doctorId, dateStr, opts = {}) => {
     const doctor = await doctorModel.findById(doctorId);
     if (!doctor) return { slots: [], dayStatus: 'closed' };
 
@@ -76,8 +93,11 @@ const getDoctorSlots = async (doctorId, dateStr) => {
         return { start, end: start.clone().add(durationMinutes, 'minutes') };
     });
 
-    const now = moment();
-    const isToday = moment(dateStr, 'YYYY-MM-DD').isSame(now, 'day');
+    // Compared as wall-clock time on the clinic's calendar day: slot times
+    // ('HH:mm') are the clinic's local times.
+    const now = clinicNow(opts.tzOffsetMinutes);
+    const isToday = now.format('YYYY-MM-DD') === moment(dateStr, 'YYYY-MM-DD').format('YYYY-MM-DD');
+    const nowMinutes = now.hours() * 60 + now.minutes();
 
     const slots = [];
     for (const shift of shifts) {
@@ -91,7 +111,7 @@ const getDoctorSlots = async (doctorId, dateStr) => {
 
             // Drop slots that have already started — "currently 6-23, even
             // an empty 5-6pm slot should never be shown" for today.
-            if (!(isToday && start.isBefore(now))) {
+            if (!(isToday && start.hours() * 60 + start.minutes() < nowMinutes)) {
                 const overlap = bookedRanges.some((b) => start.isBefore(b.end) && end.isAfter(b.start));
                 slots.push({ start: start.format('HH:mm'), end: end.format('HH:mm'), available: !overlap });
             }
@@ -112,8 +132,8 @@ const getDoctorSlots = async (doctorId, dateStr) => {
 // entirely; an hour with at least one slot is included either way so a
 // fully-booked-but-upcoming hour still shows (as unavailable) rather than
 // silently vanishing.
-const getHourlyAvailability = async (doctorId, dateStr) => {
-    const { slots, dayStatus } = await getDoctorSlots(doctorId, dateStr);
+const getHourlyAvailability = async (doctorId, dateStr, opts = {}) => {
+    const { slots, dayStatus } = await getDoctorSlots(doctorId, dateStr, opts);
 
     const buckets = new Map(); // hourStart ('HH:00') -> { start, end, available }
     for (const slot of slots) {
@@ -135,8 +155,8 @@ const getHourlyAvailability = async (doctorId, dateStr) => {
 // fine-grained slot inside it — first-fit among whatever getDoctorSlots
 // currently considers available. Returns null if the hour has filled up
 // between the dropdown being loaded and the booking being submitted.
-const resolveBookableSlot = async (doctorId, dateStr, hourStart) => {
-    const { slots } = await getDoctorSlots(doctorId, dateStr);
+const resolveBookableSlot = async (doctorId, dateStr, hourStart, opts = {}) => {
+    const { slots } = await getDoctorSlots(doctorId, dateStr, opts);
     const hourStartMoment = moment(`${dateStr} ${hourStart}`, 'YYYY-MM-DD HH:mm');
     const hourEndMoment = hourStartMoment.clone().add(1, 'hour');
 

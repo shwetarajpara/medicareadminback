@@ -1536,7 +1536,7 @@ const addAppointmentV2 = async (req, res) => {
             const now = moment();
             appointmentDate = now.format('YYYY-MM-DD');
             appointmentTime = now.format('HH:mm');
-            const { dayStatus } = await getDoctorSlots(doctorId, appointmentDate);
+            const { dayStatus } = await getDoctorSlots(doctorId, appointmentDate, { tzOffsetMinutes: req.body.tzOffsetMinutes });
             if (dayStatus === 'holiday' || dayStatus === 'closed') {
                 return errorResponse(res, 'Doctor is not available today — cannot book an emergency appointment');
             }
@@ -1549,7 +1549,7 @@ const addAppointmentV2 = async (req, res) => {
             // it to the actual bookable fine-grained slot inside that hour
             // (first-fit), the same source of truth the dropdown itself was
             // populated from.
-            const resolvedSlot = await resolveBookableSlot(doctorId, appointmentDate, appointmentTime);
+            const resolvedSlot = await resolveBookableSlot(doctorId, appointmentDate, appointmentTime, { tzOffsetMinutes: req.body.tzOffsetMinutes });
             if (!resolvedSlot) {
                 return errorResponse(res, 'Selected slot is no longer available');
             }
@@ -1784,7 +1784,7 @@ const getSlotsDetails = async (req, res) => {
         // raw averageAppointmentTime-sized slots — those still drive all the
         // actual capacity accounting underneath (see resolveBookableSlot,
         // called by addAppointment/addAppointmentV2 once staff pick an hour).
-        const { hours, dayStatus } = await getHourlyAvailability(doctorId, date);
+        const { hours, dayStatus } = await getHourlyAvailability(doctorId, date, { tzOffsetMinutes: req.body.tzOffsetMinutes });
 
         const availableSlots = hours.map((hour) => ({
             startTime: hour.start,
@@ -2178,6 +2178,29 @@ const getAppointmentsWithDetails = async (req, res) => {
         const pagination = parsePagination(req.body);
         const search = searchRegex(req.body.search);
 
+        // Department filter (absent = every appointment, with or without a
+        // department). When set, only that department's appointments: the
+        // appointment's own departmentId, or — for older appointments saved
+        // without one — the department of the doctor it was booked with.
+        let departmentMatch = null;
+        if (departmentId) {
+            if (!mongoose.isValidObjectId(departmentId)) {
+                return res.status(400).json({ success: false, message: 'Invalid departmentId' });
+            }
+            const deptObjectId = new mongoose.Types.ObjectId(departmentId);
+            const deptDoctorIds = await doctorModel.find({ specializationId: deptObjectId }, { _id: 1 }).lean()
+                .then((rows) => rows.map((r) => r._id));
+            departmentMatch = {
+                $or: [
+                    { 'appointmentData.departmentId': deptObjectId },
+                    {
+                        'appointmentData.departmentId': { $in: [null] }, // missing or null
+                        'appointmentData.doctorId': { $in: deptDoctorIds },
+                    },
+                ],
+            };
+        }
+
         // Stage 1 — select and order the matching appointment-detail rows
         // (only the joins needed to filter/search run here).
         const selectStages = [
@@ -2195,16 +2218,7 @@ const getAppointmentsWithDetails = async (req, res) => {
                 $match: (() => {
                     const m = {};
                     if (effectiveHospitalId) m['appointmentData.hospitalId'] = new mongoose.Types.ObjectId(effectiveHospitalId);
-                    // departmentId is optional and wildcard-matches records
-                    // with no departmentId (pre-department-feature data, or a
-                    // doctor with no department) — never a strict equality.
-                    if (departmentId) {
-                        m.$or = [
-                            { 'appointmentData.departmentId': new mongoose.Types.ObjectId(departmentId) },
-                            { 'appointmentData.departmentId': { $exists: false } },
-                            { 'appointmentData.departmentId': null }
-                        ];
-                    }
+                    if (departmentMatch) Object.assign(m, departmentMatch);
                     return m;
                 })()
             },
